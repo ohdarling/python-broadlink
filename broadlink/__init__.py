@@ -1,4 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
 
 from datetime import datetime
 from Crypto.Cipher import AES
@@ -46,10 +51,16 @@ def gendevice(devtype, host, mac):
     return rm(host=host, mac=mac)
   elif devtype == 0x2714: # A1
     return a1(host=host, mac=mac)
+  elif devtype == 0x2722: # s1
+    return s1(host=host, mac=mac)
+  elif devtype == 0x4E4D: # Dooya
+    return dooya(host=host, mac=mac)
   elif devtype == 0x4EB5: # MP1
     return mp1(host=host, mac=mac)
   else:
-    return device(host=host, mac=mac)
+    dev = device(host=host, mac=mac)
+    dev.typecode = devtype
+    return dev
 
 def discover(timeout=None, local_ip_address=None):
   if local_ip_address is None:
@@ -112,7 +123,9 @@ def discover(timeout=None, local_ip_address=None):
     host = response[1]
     mac = responsepacket[0x3a:0x40]
     devtype = responsepacket[0x34] | responsepacket[0x35] << 8
-    return gendevice(devtype, host, mac)
+    name = responsepacket[0x40:0x7b]
+    dev = gendevice(devtype, host, mac)
+    dev.set_name(name)
   else:
     while (time.time() - starttime) < timeout:
       cs.settimeout(timeout - (time.time() - starttime))
@@ -124,13 +137,17 @@ def discover(timeout=None, local_ip_address=None):
       host = response[1]
       devtype = responsepacket[0x34] | responsepacket[0x35] << 8
       mac = responsepacket[0x3a:0x40]
+      name = responsepacket[0x40:0x7c]
       dev = gendevice(devtype, host, mac)
+      dev.set_name(name)
       devices.append(dev)
     return devices
 
 
 class device:
   def __init__(self, host, mac, timeout=10):
+    if isinstance(mac, str) or isinstance(mac, unicode):
+      mac = bytearray(mac.replace(':', '').decode('hex'))
     self.host = host
     self.mac = mac
     self.timeout = timeout
@@ -143,7 +160,12 @@ class device:
     self.cs.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     self.cs.bind(('',0))
     self.type = "Unknown"
+    self.name = "Unknown"
+    self.typecode = 0
     self.lock = threading.Lock()
+
+  def __repr__(self):
+    return "%s (%s, %s, %s)" % (self.name, self.type, self.host, str(self.mac).encode('hex'))
 
   def auth(self):
     payload = bytearray(0x50)
@@ -192,6 +214,16 @@ class device:
 
   def get_type(self):
     return self.type
+
+  def set_name(self, name):
+    if isinstance(name, bytearray):
+      name_len = 0
+      for i in range(len(name)):
+        if name[i] == 0:
+          name_len = i
+          break
+      name = unicode(str(name[0:name_len]), 'utf-8')
+    self.name = name
 
   def send_packet(self, command, payload):
     self.count = (self.count + 1) & 0xffff
@@ -352,7 +384,7 @@ class sp2(device):
     if err == 0:
       aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
       payload = aes.decrypt(bytes(response[0x38:]))
-      return bool(payload[0x4])
+      return bool(int(payload[0x4].encode('hex')))
 
 class a1(device):
   def __init__ (self, host, mac):
@@ -449,7 +481,13 @@ class rm(device):
       payload = aes.decrypt(bytes(response[0x38:]))
       return payload[0x04:]
 
+  def check_data_str(self):
+    data = self.check_data()
+    return data.encode('hex') if data else None
+
   def send_data(self, data):
+    if isinstance(data, str):
+      data = bytearray(data.decode('hex'))
     packet = bytearray([0x02, 0x00, 0x00, 0x00])
     packet += data
     self.send_packet(0x6a, packet)
@@ -472,6 +510,47 @@ class rm(device):
       else:
         temp = (ord(payload[0x4]) * 10 + ord(payload[0x5])) / 10.0
       return temp
+
+
+class s1(device):
+  def __init__ (self, host, mac):
+    device.__init__(self, host, mac)
+    self.type = "S1"
+
+  def check_sensors(self, cmd):
+    packet = bytearray(16)
+    # 1 可能是任务列表
+    # 2 可能是任务个数
+    packet[0] = cmd
+    response = self.send_packet(0x6a, packet)
+    err = response[0x22] | (response[0x23] << 8)
+    if err == 0:
+      data = {}
+      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
+      payload = aes.decrypt(bytes(response[0x38:]))
+      print len(payload)
+      print str(payload).encode('hex')
+
+
+class dooya(device):
+  def __init__ (self, host, mac):
+    device.__init__(self, host, mac)
+    self.type = "Dooya"
+
+  def check_sensors(self, cmd):
+    packet = bytearray(16)
+    # 1 可能是任务列表
+    # 2 可能是任务个数
+    packet[0] = cmd
+    response = self.send_packet(0x6a, packet)
+    err = response[0x22] | (response[0x23] << 8)
+    if err == 0:
+      data = {}
+      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
+      payload = aes.decrypt(bytes(response[0x38:]))
+      print len(payload)
+      print str(payload).encode('hex')
+
 
 # For legay compatibility - don't use this
 class rm2(rm):
